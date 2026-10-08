@@ -18,6 +18,7 @@ class RunTelemetry(BaseModel):
     architecture: str | None = None
     model: str | None = None
     latency_ms: float | None = None
+    quota_wait_ms: float | None = Field(default=None, description="Part of latency spent pacing/backing off for API rate limits")
     guardrail_corrections: list[str] = Field(default_factory=list, description="What the deterministic guardrail changed in the agent output")
 
 

@@ -1,0 +1,7 @@
+case_id,request_id,architecture,passed_minimum_checks,latency_ms,llm_calls,tool_calls,failures
+PUB-01,REQ-1001,staged,True,17566.7,3,5,
+PUB-02,REQ-1002,staged,True,16534.1,3,5,
+PUB-03,REQ-1003,staged,True,19002.4,3,5,
+PUB-04,REQ-1005,staged,True,18996.2,3,5,
+PUB-05,REQ-1006,staged,True,16055.2,3,5,
+PUB-06,REQ-1009,staged,True,23164.6,3,5,

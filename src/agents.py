@@ -69,7 +69,7 @@ Trust boundary:
 Recommendation codes (choose the most severe that applies):
 - request_clarification: policy-required information missing, or business purpose too vague to judge the need.
 - escalate_manual_review: material evidence unverifiable or conflicting (vendor-risk unavailable, registry vs service conflict), or budget exceeded/unverifiable.
-- reuse_existing_tool: an approved catalog tool already available to this team appears to cover the need and the request gives no credible gap. (Extra seats/add-ons for a tool the team already uses, with a stated reason, is NOT reuse.)
+- reuse_existing_tool: an approved catalog tool already available to this team (company-wide or the team's own scope) appears to cover the need and the request states no credible gap. If your next step would be "confirm whether the existing tool/capacity covers the need before buying", this is the code. (Extra seats/add-ons for a tool the team already uses, with a stated reason, is NOT reuse.)
 - route_for_review: complete, verifiable request; send to the required approvers and reviewers.
 
 Procurement policy (source of truth):
@@ -88,16 +88,32 @@ class AgentError(RuntimeError):
     pass
 
 
+class ModelUnavailable(AgentError):
+    """Model stayed rate-limited/overloaded after short retries -> analyze() restarts the run on the next model."""
+
+
+TRANSIENT = (408, 429, 500, 502, 503, 504)
+_last_call = [0.0]  # process-wide pacing for free-tier RPM limits
+
+
+def model_chain() -> list[str]:
+    # Free tier: 3.1-flash-lite 15 RPM / 500 RPD (the evaluated model); 3.8-flash only 20 RPD; gemma 16K TPM.
+    primary = os.getenv("MODEL_NAME") or "gemini-3.1-flash-lite"
+    fallbacks = os.getenv("MODEL_FALLBACKS", "gemini-3.8-flash,gemma-4-31b-it")
+    return [primary] + [m.strip() for m in fallbacks.split(",") if m.strip() and m.strip() != primary]
+
+
 # ---------------------------------------------------------------- Gemini plumbing
 class Gemini:
-    def __init__(self) -> None:
+    def __init__(self, model: str) -> None:
         from google import genai  # imported lazily so the deterministic path works without the SDK/key
 
         if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
             raise AgentError("GEMINI_API_KEY is not set")
         self.client = genai.Client()
-        self.model = os.getenv("MODEL_NAME") or "gemini-2.5-flash"
+        self.model = model
         self.calls = 0
+        self.wait_s = 0.0  # time spent pacing/backing off, reported so latency can be read net of quota waits
 
     def config(self, system: str, specs: list[dict]):
         from google.genai import types
@@ -116,19 +132,28 @@ class Gemini:
     def generate(self, contents: list, config):
         from google.genai import errors
 
-        for attempt in range(6):
+        rpm = float(os.getenv("LLM_RPM") or 0)
+        for attempt in range(3):
+            if rpm:
+                gap = 60 / rpm - (time.monotonic() - _last_call[0])
+                if gap > 0:
+                    self.wait_s += gap
+                    time.sleep(gap)
+            _last_call[0] = time.monotonic()
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=contents, config=config)
                 self.calls += 1
                 return resp
             except errors.APIError as exc:
-                if exc.code in (408, 429, 500, 502, 503, 504) and attempt < 5:
-                    wait = min(60, 5 * 2 ** attempt)
-                    log.warning("Gemini %s, retrying in %ss", exc.code, wait)
-                    time.sleep(wait)
-                    continue
-                raise AgentError(f"Gemini API error {exc.code}: {exc.message}") from exc
-        raise AgentError("Gemini retries exhausted")
+                if exc.code not in TRANSIENT:
+                    raise AgentError(f"{self.model} error {exc.code}: {exc.message}") from exc
+                if attempt == 2 or "PerDay" in str(exc):  # daily quota: waiting seconds won't help
+                    raise ModelUnavailable(f"{self.model} error {exc.code}: {exc.message}") from exc
+                wait = 5 * 3 ** attempt  # 5s, 15s
+                log.warning("%s returned %s, retrying in %ss", self.model, exc.code, wait)
+                self.wait_s += wait
+                time.sleep(wait)
+        raise AgentError("unreachable")
 
     def tool_loop(self, system: str, user_text: str, finish: dict, box: ToolBox, transcript: list) -> dict:
         """Run tool calls until the model calls `finish`; return its arguments."""
@@ -209,7 +234,7 @@ def _next_step(code: str, approvals: list[str], floor: dict) -> str:
 
 
 def finalize(request_id: str, raw: dict | None, box: ToolBox, architecture: str, llm_calls: int,
-             started: float, model: str | None, llm_error: str | None = None) -> ProcurementDecision:
+             started: float, model: str | None, llm_error: str | None = None, wait_s: float = 0.0) -> ProcurementDecision:
     floor = box.evaluate_policy_rules(request_id)  # direct call: guardrail, not counted as agent tool use
     agent_tool_calls = list(box.tool_calls)
     corrections: list[str] = []
@@ -290,6 +315,7 @@ def finalize(request_id: str, raw: dict | None, box: ToolBox, architecture: str,
         telemetry=RunTelemetry(
             llm_calls=llm_calls, tool_calls=len(agent_tool_calls), tool_names=agent_tool_calls,
             architecture=architecture, model=model, latency_ms=round((time.perf_counter() - started) * 1000, 1),
+            quota_wait_ms=round(wait_s * 1000, 1),
             guardrail_corrections=corrections,
         ),
     )
@@ -298,13 +324,27 @@ def finalize(request_id: str, raw: dict | None, box: ToolBox, architecture: str,
 def analyze(request_id: str, architecture: Architecture = "single") -> ProcurementDecision:
     data_access.get_request(request_id)  # unknown ID -> KeyError before any LLM spend
     started = time.perf_counter()
-    box = ToolBox()
-    llm, raw, error = None, None, None
-    try:
-        llm = Gemini()
-        raw = (run_staged if architecture == "staged" else run_single)(request_id, llm, box)
-    except Exception as exc:  # any LLM/SDK failure degrades to the deterministic floor, never a crash
-        error = f"{type(exc).__name__}: {exc}"
-        log.error("agent failed for %s (%s): %s - falling back to deterministic decision", request_id, architecture, exc)
-    return finalize(request_id, raw, box, architecture, llm.calls if llm else 0, started,
-                    llm.model if llm else None, error)
+    raw, error, calls, wait_s, model, box = None, None, 0, 0.0, None, ToolBox()
+    # One model per run (tool-call history isn't portable across models); on quota/overload restart on the next.
+    for model in model_chain():
+        box = ToolBox()
+        try:
+            llm = Gemini(model)
+        except AgentError as exc:
+            error = str(exc)
+            break
+        try:
+            raw = (run_staged if architecture == "staged" else run_single)(request_id, llm, box)
+            error = None
+            break
+        except ModelUnavailable as exc:
+            error = str(exc)
+            log.warning("%s unavailable for %s, trying next model", model, request_id)
+        except Exception as exc:  # any other LLM/SDK failure degrades to the deterministic floor, never a crash
+            error = f"{type(exc).__name__}: {exc}"
+            break
+        finally:
+            calls, wait_s = calls + llm.calls, wait_s + llm.wait_s
+    if error:
+        log.error("agent failed for %s (%s): %s - falling back to deterministic decision", request_id, architecture, error)
+    return finalize(request_id, raw, box, architecture, calls, started, model, error, wait_s)

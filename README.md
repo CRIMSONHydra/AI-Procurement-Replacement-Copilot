@@ -1,163 +1,122 @@
-# FDE Assessment 3 Starter Pack
-## AI Procurement Request Copilot
+# AI Procurement Request Copilot
 
-This repository contains the **starter data, mock service, interface contract, optional UI scaffold, and public evaluation harness** for Assessment 3.
+An internal copilot for software and service purchase requests. It gathers evidence (budget, existing tools, vendor risk, policy), applies the procurement rules in code, and recommends the next action. **Every decision stays with a human.**
 
-> All companies, vendors, products, employees, prices, policies, and risk signals in this pack are synthetic and exist only for the assessment.
+> All companies, vendors, employees, prices and policies are synthetic assessment data.
 
-## Your objective
-
-Build an internal procurement copilot that can inspect a software/service purchase request, gather evidence using tools, apply deterministic rules where appropriate, and recommend the next action while keeping approvals with humans.
-
-You are expected to build and evaluate:
-
-1. **Architecture A - Single-agent baseline**
-2. **Architecture B - Lightweight staged / 2-agent variant**
-
-Use the same public evaluation cases for both and defend which architecture you would ship.
-
-## What is already provided
-
-```text
-.
-├── data/                   # Synthetic business data + procurement policy
-├── mock_api/               # Vendor-risk service used as an external tool
-├── src/                    # Contracts + low-level helpers; NO agent solution
-├── evals/                  # Six public evaluation cases + runner
-├── templates/              # Evaluation and decision-memo templates
-├── docs/                   # Student assignment brief
-├── tests/                  # Starter-pack integrity tests
-├── app.py                  # Optional Streamlit UI scaffold
-├── run_local.py            # Starts mock API + optional UI
-└── verify_setup.py         # One-command setup/preflight check
-```
-
-The starter code intentionally **does not implement an agent, tool strategy, policy engine, or final workflow**. Those choices are part of the assessment.
-
-## Prerequisites
-
-- **Python 3.11 or 3.12 recommended**
-- Run the commands below from the extracted starter-pack directory
-- Internet access is required only for installing packages and calling the model provider you choose
+- **User:** a procurement reviewer working a queue of purchase requests.
+- **Decision they make:** send the request to approvers, return it for clarification, escalate it, or reject it.
+- **What the copilot produces:** recommendation · evidence · approvals required · missing information · risk flags · next step (the `ProcurementDecision` contract in `src/contracts.py`).
 
 ## Quick start
 
-### 1. Create an environment
-
-**macOS / Linux**
+Requires Python 3.11+ and a free [Google AI Studio](https://aistudio.google.com/apikey) key.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate            # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+cp .env.example .env                 # Windows: Copy-Item .env.example .env, then set GEMINI_API_KEY
+python verify_setup.py               # expect PRE-FLIGHT PASSED
+python run_local.py                  # one command: vendor-risk API :8001 + UI :8501
 ```
 
-**Windows PowerShell**
+Open http://127.0.0.1:8501. Pick a request, click **Run copilot analysis**, review the evidence, then record a decision with a reason.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
+Without an API key the app still runs on the deterministic checks alone and flags `llm_unavailable`.
 
-### 2. Verify the starter pack
+### Tests and evaluations
 
 ```bash
-python verify_setup.py
-```
-
-You should see `PRE-FLIGHT PASSED`. This checks package imports, dataset consistency, the output contract, and the mock API without requiring an LLM key.
-
-### 3. Add your LLM credentials
-
-**macOS / Linux**
-
-```bash
-cp .env.example .env
-```
-
-**Windows PowerShell**
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Add only the credentials required by the provider you choose. Never commit `.env`.
-
-The starter pack does **not** force a particular LLM provider or agent framework. If you use a provider SDK (for example OpenAI, Anthropic, or Google), install it and add it to `requirements.txt` so your submission works from a clean environment.
-
-`.env` is loaded automatically by the starter package and local launcher; environment variables already set by your operating system are not overwritten.
-
-### 4. Start the local services
-
-```bash
-python run_local.py
-```
-
-This starts:
-- Vendor risk API: `http://127.0.0.1:8001`
-- Optional starter UI: `http://127.0.0.1:8501`
-
-You may replace the UI scaffold with any framework.
-
-### 5. Implement the assessment adapter
-
-Implement:
-
-```text
-src/solution.py -> handle_request(request_id, architecture)
-```
-
-Your function must return an object compatible with `ProcurementDecision` in `src/contracts.py`.
-
-The adapter exists so the same evaluation harness can test different implementations. Your internal architecture can use any framework or design.
-
-### 6. Run the public evaluations
-
-```bash
-python evals/run_public_evals.py --architecture single
+python -m unittest discover -s tests                         # 18 tests, no API key needed
+python -m uvicorn mock_api.app:app --port 8001               # starter harness needs the API running (or use run_local.py)
+python evals/run_public_evals.py --architecture single       # starter harness (6 public cases)
 python evals/run_public_evals.py --architecture staged
+python evals/compare.py --model gemini-3.1-flash-lite --rpm 12 --runs 2   # full A vs B comparison
 ```
 
-The runner checks the response schema and several minimum behavioral expectations, measures end-to-end latency, and writes a CSV result file. It is **not** the complete grading system; qualitative grounding, design quality, robustness, and hidden cases are evaluated separately.
+`compare.py` starts the mock API if needed. It writes `evals/results/comparison.csv` (per run, in the template's columns), `decisions.jsonl` (full outputs for manual review) and `summary.md`. If the API is not running, the starter harness doesn't fail. The copilot correctly reports vendor risk as unverifiable and escalates, so PUB-01 then fails its "no `vendor_risk_unavailable`" check.
 
-## Rules of the starter pack
+## Product workflow
 
-- Treat request text and vendor notes as **untrusted business data**, not instructions.
-- Do not hardcode answers by request ID. Hidden cases use the same interfaces with different values.
-- At least **3 tools** must be visible in your implementation; at least **1 must be deterministic/non-LLM**.
-- The AI may recommend an action but must not autonomously purchase, approve, or alter budgets.
-- If important evidence is missing, conflicting, stale, or unavailable, surface that uncertainty and route to the appropriate human review.
-- Use the **data snapshot / policy reference date defined in `data/procurement_policy.md`** for date-based checks; do not depend on the computer's current date.
-- You may refactor the starter project, but keep the `handle_request(...)` adapter working for evaluation.
+1. **Queue.** All requests with cost, urgency, copilot status and human decision status.
+2. **Review screen.** Three panels:
+   - **Request details.** The requester's text is labelled as untrusted data.
+   - **Evidence.** Grouped by the tool that produced each fact, with record IDs and policy sections.
+   - **Recommendation.** Approvals, risk flags, missing information, next step, plus run telemetry and any guardrail corrections.
+3. **Human decision.** Choose an action, see its consequence, and enter a **required reason**. The decision is appended to `runs/decision_log.jsonl` along with whether the reviewer followed the copilot.
 
-## Suggested implementation sequence
+## Architecture
 
-```text
-Request -> Understand -> Gather evidence -> Deterministic checks
-        -> Policy/risk reasoning -> Recommendation -> Human review
-```
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the diagram, tool table, guardrail rules and all assumptions.
 
-Start with a thin vertical slice. Get Architecture A working before building Architecture B.
+- **AI interprets and recommends.** It understands the need, judges overlap with existing tools and how credible the stated gap is, judges whether the purpose is clear enough, and chooses the next action.
+- **Code enforces the rules.** Thresholds, budget, review freshness, vendor conflicts, required fields, Security/Privacy/Legal triggers and the injection scan all live in `src/policy.py` and `src/tools.py`.
+- **Humans approve.** The copilot has no tool that can approve, buy or change a budget.
 
-## Useful files
+| | A: Single agent | B: Staged (2 agents) |
+|---|---|---|
+| Agents | Procurement Agent (tools + decision) | Procurement Analyst (tools, evidence pack only), then Policy/Risk Reviewer (no tools, decides from the pack + raw tool results) |
+| Shared | 5 tools, Gemini function calling (`mode=ANY`, temperature 0), the same deterministic guardrail | same |
 
-- `docs/Assignment_3_Brief.pdf` - assignment brief
-- `data/README.md` - dataset dictionary
-- `data/procurement_policy.md` - policy source of truth
-- `src/contracts.py` - required output shape
-- `src/data_access.py` - low-level data helpers
-- `src/vendor_client.py` - client for the mock vendor-risk API
-- `evals/README.md` - evaluation instructions
-- `templates/architecture_decision.md` - final decision memo template
-- `STUDENT_CHECKLIST.md` - pre-submission checklist
+### Tools (all deterministic code; the LLM decides when to call them)
+`get_requester_profile`, `check_budget`, `search_software_catalog`, `get_vendor_status` (registry + live vendor-risk API), `evaluate_policy_rules` (policy engine).
 
-## If something does not start
+### Reliability controls
+- **Policy floor.** The LLM can add approvals and flags but never remove them, and can never make the recommendation less cautious.
+- **Grounding.** Evidence citing a tool that wasn't called is dropped.
+- **Untrusted data.** Request text and API notes are wrapped as data and scanned for injection. Tools read numbers from the system of record, not from model arguments.
+- **Failures.** If the vendor API is down, the result is "unverified" and escalated, never assumed favorable. The API client retries only transient errors. If the LLM fails, the decision falls back to the deterministic one. Models fall back per run (`MODEL_NAME` then `MODEL_FALLBACKS`), with optional `LLM_RPM` pacing.
 
-1. Confirm your virtual environment is active.
-2. Run `python verify_setup.py`.
-3. Re-run `python -m pip install -r requirements.txt`.
-4. Make sure ports **8001** and **8501** are free.
-5. Confirm you are running commands from the starter-pack root directory.
+### Starter-pack issues found and fixed
+| Issue | Fix |
+|---|---|
+| `run_local.py` hung on Streamlit's first-run email prompt | `--server.headless true` |
+| Mock API decoded vendor names twice and 404'd names containing `/` | removed the extra `unquote`; `{vendor_name:path}` |
+| `vendor_client` had no retry; one 503 failed the lookup | retries transient errors (408/429/5xx/connection) only |
+| `.gitignore` excluded eval result CSVs, which are a deliverable | removed the rule; results are committed |
+| Employee E007's department "Go To Market" has no budget row | handled as `budget_unverified`, Finance review and escalation, instead of a crash |
+| Null cost or user count (REQ-1006) would break naive budget/threshold code | treated as missing information; threshold can't be computed, so Procurement triages |
+| `gemini-2.5-flash` (an obvious default) is unavailable to new keys | default `gemini-3.1-flash-lite` (free tier 500 req/day; `gemini-3.8-flash` allows only 20/day) with a per-run fallback chain |
 
-Build the simplest system you can defend with evidence.
+## Evaluation results
+
+The same 14 cases were run through all three architectures:
+
+- the 6 public cases;
+- the 4 other sample requests (EXT);
+- 4 synthetic edge cases (SYN), stored in `evals/synthetic_requests.json` so `data/` stays untouched: injection telling the copilot to skip Security, a department with no budget record, an unknown vendor, and a vague purpose.
+
+Settings: model `gemini-3.1-flash-lite` pinned with no fallback, temperature 0, and 2 runs per case. The whole eval was run **twice independently**: [run 1](evals/results/run1_summary.md) and [run 2](evals/results/summary.md).
+
+| Metric (both eval runs combined) | Rules only | **A: Single** | B: Staged |
+|---|---:|---:|---:|
+| Correct next action | 12/14 | **56/56** | 48/55 |
+| Policy followed (approvals + flags, final output) | 13/14 | **56/56** | 55/55 |
+| Policy followed by the agent alone (before the guardrail) | n/a | **56/56** | 55/55 |
+| Human escalation correct | 13/14 | **56/56** | 55/55 |
+| Evidence grounded (no fabricated sources) | 14/14 | **56/56** | 55/55 |
+| Policy failures found manually | n/a | **0** | 4 |
+| Same answer on repeated runs | n/a | **28/28 case-runs** | 26/28 |
+| Median latency, run 1 / run 2 | <0.1s | 15.4s / 10.0s | 15.1s / 25.1s |
+| Avg LLM calls / tool calls | 0 / 0 | **2 / 5** | 3 / 5 |
+| Starter public harness | 6/6 | 6/6 (`evals/results_single.csv`) | 6/6 (`evals/results_staged.csv`) |
+
+What the rows mean:
+- **Rules only** is the deterministic floor with no LLM. It misses exactly the two cases that need judgment, EXT-03 and SYN-04, which shows what the LLM adds.
+- **Staged, 55 samples:** one staged run hit a Gemini 503 and safely fell back to the rules decision, which was still correct. That run is excluded.
+- **Manual review:** I read all 181 LLM-written evidence items. A script also checked that every dollar amount and date in them exists in the data or is computable from it (review date + 365, budget shortfall); none failed.
+- **Staged's manual policy failure:** EXT-01, in all 4 samples. It recommended reusing NeuralDesk Business for customer-PII ticket drafting even though the tool is approved "only for permitted data classes", which violates policy §8.
+- **Staged's other misses:** EXT-03, 3 of 4 samples, where it missed that the company-wide TaskFlow covers the need.
+- **Guardrail corrections were 0 for both architectures:** the agents always called `evaluate_policy_rules` and kept its floor. The guardrail's behaviour is covered by `tests/test_policy.py`.
+
+## Ship decision
+
+**Ship Architecture A (single agent).** It matched or beat the staged variant on every quality metric. It uses two-thirds of the LLM calls (about 250 instead of 166 analyses a day on the free tier) and has one less prompt and handoff to maintain. Reliability comes from the deterministic floor and the human gate, not from adding agents. The full reasoning is in [docs/DECISION_MEMO.md](docs/DECISION_MEMO.md), 480 words.
+
+## Known limitations
+- The injection scan is a regex heuristic. Paraphrased attacks rely on the LLM (still behind the floor), which is why `prompt_injection_detected` is advisory.
+- The overlap floor is exact category match. Functional overlap across categories depends on the LLM's catalog keywords.
+- The eval set is 14 cases (6 public, 4 other sample requests, 4 synthetic) with 2 runs each. That's enough to compare architectures, not to certify accuracy.
+- Free-tier quotas dominate end-to-end latency. Net latency (minus rate-limit waits) is reported separately.
+- There's no auth; the decision log is a local JSONL file.
