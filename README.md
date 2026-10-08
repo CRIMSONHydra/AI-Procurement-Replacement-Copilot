@@ -35,7 +35,7 @@ python evals/run_public_evals.py --architecture staged
 python evals/compare.py --model gemini-3.1-flash-lite --rpm 12 --runs 2   # full A vs B comparison
 ```
 
-`compare.py` starts the mock API if needed. It writes `evals/results/comparison.csv` (per run, in the template's columns), `decisions.jsonl` (full outputs for manual review) and `summary.md`. If the API is not running, the starter harness doesn't fail. The copilot correctly reports vendor risk as unverifiable and escalates, so PUB-01 then fails its "no `vendor_risk_unavailable`" check.
+`compare.py` starts the mock API if needed. It writes `evals/results/comparison.csv` (one row per run, with the starter's evaluation-template columns: correct_next_action, grounded_evidence, policy_followed, human_escalation_correct, latency, LLM/tool calls), `decisions.jsonl` (full outputs for manual review) and `summary.md`. If the API is not running, the starter harness doesn't fail. The copilot correctly reports vendor risk as unverifiable and escalates, so PUB-01 then fails its "no `vendor_risk_unavailable`" check.
 
 ## Product workflow
 
@@ -48,7 +48,7 @@ python evals/compare.py --model gemini-3.1-flash-lite --rpm 12 --runs 2   # full
 
 ## Architecture
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the diagram, tool table, guardrail rules and all assumptions.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the workflow diagram, tool table, guardrail rules and the full assumptions list. The functional spec (user, goal, acceptance criteria, out of scope) is in [docs/SPEC.md](docs/SPEC.md).
 
 - **AI interprets and recommends.** It understands the need, judges overlap with existing tools and how credible the stated gap is, judges whether the purpose is clear enough, and chooses the next action.
 - **Code enforces the rules.** Thresholds, budget, review freshness, vendor conflicts, required fields, Security/Privacy/Legal triggers and the injection scan all live in `src/policy.py` and `src/tools.py`.
@@ -79,6 +79,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the diagram, tool table, gu
 | Null cost or user count (REQ-1006) would break naive budget/threshold code | treated as missing information; threshold can't be computed, so Procurement triages |
 | `gemini-2.5-flash` (an obvious default) is unavailable to new keys | default `gemini-3.1-flash-lite` (free tier 500 req/day; `gemini-3.8-flash` allows only 20/day) with a per-run fallback chain |
 
+## Assumptions
+
+The full list, with reasons, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#assumptions). The ones that most affect outcomes:
+
+- **Dates.** They come from the policy's reference date (2026-09-30), not the system clock. A vendor review is current for 365 days, inclusive.
+- **Thresholds.** Financial tiers use `> $10,000` (policy §4), but Legal review for a new vendor starts at `>= $10,000` (§7), exactly as the policy words it.
+- **Overlap.** A catalog tool in the same category raises `existing_tool_overlap`. Whether the team should actually reuse that tool is the LLM's judgment.
+- **Unknown means unverified.** If the vendor API is unavailable, or a data-access level or department budget is unknown, the copilot never treats that as favorable. It escalates or asks for clarification.
+- **Conflicts.** If the internal registry and the vendor-risk API disagree, that is a conflict for Security to resolve, not something the copilot picks a side on.
+- **Human review is always required.** Every request ends with a human decision; the copilot only recommends.
+
 ## Evaluation results
 
 The same 14 cases were run through all three architectures:
@@ -103,7 +114,7 @@ Settings: model `gemini-3.1-flash-lite` pinned with no fallback, temperature 0, 
 | Starter public harness | 6/6 | 6/6 (`evals/results_single.csv`) | 6/6 (`evals/results_staged.csv`) |
 
 What the rows mean:
-- **Rules only** is the deterministic floor with no LLM. It misses exactly the two cases that need judgment, EXT-03 and SYN-04, which shows what the LLM adds.
+- **Rules only** is the deterministic floor with no LLM. It gives the same output every run, so it is counted once. It misses exactly the two cases that need judgment, EXT-03 and SYN-04, which shows what the LLM adds.
 - **Staged, 55 samples:** one staged run hit a Gemini 503 and safely fell back to the rules decision, which was still correct. That run is excluded.
 - **Manual review:** I read all 181 LLM-written evidence items. A script also checked that every dollar amount and date in them exists in the data or is computable from it (review date + 365, budget shortfall); none failed.
 - **Staged's manual policy failure:** EXT-01, in all 4 samples. It recommended reusing NeuralDesk Business for customer-PII ticket drafting even though the tool is approved "only for permitted data classes", which violates policy §8.
