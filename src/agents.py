@@ -125,7 +125,7 @@ class Gemini:
                 types.FunctionDeclaration(name=s["name"], description=s["description"], parameters_json_schema=s["parameters"])
                 for s in specs])],
             # ANY = every turn must be a function call, so the run always ends in structured output.
-            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY")),
+            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingConfigMode.ANY)),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
@@ -274,6 +274,8 @@ def finalize(request_id: str, raw: dict | None, box: ToolBox, architecture: str,
     for e in raw.get("evidence") or []:
         src = str(e.get("source") or "")
         tool = next((t for t in TOOL_NAMES if t in src), None)
+        if tool == "evaluate_policy_rules" and tool in agent_tool_calls:
+            continue  # the engine's own findings are appended verbatim below; skip the LLM's paraphrase
         if tool and tool in agent_tool_calls:
             evidence.append(EvidenceItem(source=tool, finding=str(e.get("finding")), reference=e.get("reference") or None))
         else:
